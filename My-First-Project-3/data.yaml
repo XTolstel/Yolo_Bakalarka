@@ -1,0 +1,17 @@
+names:
+- column JBL
+- headphones
+- knife victorinox
+- luffy
+- tie fighter
+nc: 5
+roboflow:
+  license: CC BY 4.0
+  project: my-first-project-iwxqd
+  url: https://universe.roboflow.com/object-detection-yolo-bp/my-first-project-iwxqd/dataset/3
+  version: 3
+  workspace: object-detection-yolo-bp
+test: /home/oleg/Документы/Bakalarka_Yolo/My-First-Project-3/test/images
+train: /home/oleg/Документы/Bakalarka_Yolo/My-First-Project-3/train/images
+val: /home/oleg/Документы/Bakalarka_Yolo/My-First-Project-3/valid/images
+
