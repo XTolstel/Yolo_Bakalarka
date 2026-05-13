@@ -116,7 +116,34 @@ print(f"Загруженность CPU; {avg_cpu_usage:.2f}")
 print(f"Загруженность GPU: {avg_gpu_usage:.2f}")
 print(f"Средняя мощность видеокарты: {avg_gpu_power:.2f}")
 print(f"Средняя мощность процессора: {power_cpu:.2f}")
-print(f"Время обработки одного кадра: {result:.2f}")
+avg_time_per_frame = 0
+latencies_ms = []
+processed_frames = 0
+processing_time_s = 0
+
+if isinstance(result, dict):
+    avg_time_per_frame = result.get("avg_time_per_frame_s", 0)
+    latencies_ms = result.get("latencies_ms", []) or []
+    processed_frames = result.get("total_frames", 0) or 0
+    processing_time_s = result.get("total_processing_time_s", 0) or 0
+else:
+    avg_time_per_frame = result if result is not None else 0
+
+energy_per_frame_j = 0
+if processed_frames > 0:
+    total_gpu_energy_j = avg_gpu_power * total_time
+    total_cpu_energy_j = (end_energy - start_energy) / 1e6 if (start_energy is not None and end_energy is not None) else 0
+    energy_per_frame_j = (total_cpu_energy_j + total_gpu_energy_j) / processed_frames
+
+avg_fps = (processed_frames / processing_time_s) if processing_time_s > 0 else 0
+p95_latency_ms = float(np.percentile(latencies_ms, 95)) if latencies_ms else 0
+p99_latency_ms = float(np.percentile(latencies_ms, 99)) if latencies_ms else 0
+
+# Сохраняем полный исходный вывод + дополняем его 4 новыми метриками
+print(f"Время обработки одного кадра: {avg_time_per_frame:.2f}")
+print(f"avg_fps: {avg_fps:.2f}")
+print(f"p95_latency_ms: {p95_latency_ms:.2f}")
+print(f"p99_latency_ms: {p99_latency_ms:.2f}")
+print(f"energy_per_frame_j: {energy_per_frame_j:.6f}")
 if gpu_usage == 0 and gpu_power == 0:
     print("GPU is missing")
-
