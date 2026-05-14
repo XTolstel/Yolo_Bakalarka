@@ -35,8 +35,6 @@ class object_detection:
         frame_latencies_ms = []
         stage_latencies_ms = {
             "capture_to_decode_start": [],
-            "decode": [],
-            "preprocess": [],
             "inference": [],
             "postprocess": [],
             "render_output": [],
@@ -57,10 +55,6 @@ class object_detection:
             if frame_count % frame_rate != 0:
                 continue
             start_time = time.perf_counter()
-
-            # Эмуляция этапов пайплайна для детального latency-профиля
-            t2 = start_time  # Decode End
-            t3 = t2          # Preprocess Start
 
             # Предсказание с использованием YOLOv8
             t5 = time.perf_counter()  # Inference Start
@@ -87,13 +81,10 @@ class object_detection:
             print(f"Frame of video: {frame_count:.1f}")
 
             end_time = time.perf_counter()
-            t4 = t5  # Preprocess End
             frame_time_s = end_time - start_time
             total_time += frame_time_s
             frame_latencies_ms.append(frame_time_s * 1000.0)
             stage_latencies_ms["capture_to_decode_start"].append((t1 - t0) * 1000.0)
-            stage_latencies_ms["decode"].append((t2 - t1) * 1000.0)
-            stage_latencies_ms["preprocess"].append((t4 - t3) * 1000.0)
             stage_latencies_ms["inference"].append((t6 - t5) * 1000.0)
             stage_latencies_ms["postprocess"].append((t7 - t6) * 1000.0)
             stage_latencies_ms["render_output"].append((t8 - t7) * 1000.0)
