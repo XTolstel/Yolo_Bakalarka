@@ -30,6 +30,7 @@ class object_detection:
         # Обработка кадров
         total_frames = 0
         total_time = 0
+        frame_latencies_ms = []
         while True:
             ret, frame = cap.read()  # Считываем кадр с видео
             if not ret:
@@ -59,11 +60,18 @@ class object_detection:
             print(f"Frame of video: {frame_count:.1f}")
 
             end_time = time.time()
-            total_time += (end_time - start_time)
+            frame_time_s = end_time - start_time
+            total_time += frame_time_s
+            frame_latencies_ms.append(frame_time_s * 1000.0)
             total_frames += 1
 
         cap.release()
         out_yolo.release()
 
         avg_time_per_frame = total_time / total_frames if total_frames else 0
-        return avg_time_per_frame
+        return {
+            "avg_time_per_frame_s": avg_time_per_frame,
+            "total_frames": total_frames,
+            "total_processing_time_s": total_time,
+            "latencies_ms": frame_latencies_ms,
+        }
