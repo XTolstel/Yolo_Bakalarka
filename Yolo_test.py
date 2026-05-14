@@ -6,15 +6,15 @@ import matplotlib.pyplot as plt
 class object_detection:
     def detection():
         # Загрузка модели YOLOv8
-        #net = YOLO("/home/oleg/runs/detect/train6/weights/best.pt") #model pre auta
-        net = YOLO("/home/oleg/runs/detect/train9/weights/best.pt")
+        net = YOLO("/home/oleg/runs/detect/train6/weights/best.pt") #model pre auta
+        #net = YOLO("/home/oleg/runs/detect/train9/weights/best.pt")
         #net = YOLO("yolov8x.pt")  # Наприклад, використання YOLOv8m
 
         #net = YOLO("/home/oleh/runs/detect/train9/weights/best.pt") # location for notebook
 
         # Загрузка видео
-        #video_path = "Video/video_yolo_cars.mp4"
-        video_path = "Video/Video_test3.mp4"
+        video_path = "Video/video_yolo_cars.mp4"
+        #video_path = "Video/Video_test3.mp4"
         cap = cv2.VideoCapture(video_path)
 
         # Получение параметров исходного видео
