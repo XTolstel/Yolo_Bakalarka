@@ -13,7 +13,8 @@ class object_detection:
         #net = YOLO("/home/oleh/runs/detect/train9/weights/best.pt") # location for notebook
 
         # Загрузка видео
-        video_path = "Video/video_yolo_cars.mp4"
+        #video_path = "Video/video_yolo_cars.mp4"
+        video_path = "Video/Video_test3.mp4"
         cap = cv2.VideoCapture(video_path)
 
         # Получение параметров исходного видео
@@ -26,7 +27,7 @@ class object_detection:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # Кодек для сжатия
         out_yolo = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
 
-        frame_rate = 1  # Какой по счету берем кадр
+        frame_rate = 5  # Какой по счету берем кадр
         frame_count = 0
         # Обработка кадров
         total_frames = 0
