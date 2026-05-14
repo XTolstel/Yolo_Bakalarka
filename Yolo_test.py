@@ -27,7 +27,7 @@ class object_detection:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # Кодек для сжатия
         out_yolo = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
 
-        frame_rate = 5  # Какой по счету берем кадр
+        frame_rate = 1  # Какой по счету берем кадр
         frame_count = 0
         # Обработка кадров
         total_frames = 0
@@ -108,7 +108,7 @@ class object_detection:
 
         if total_frames:
             plt.figure(figsize=(12, 6))
-            plot_latency_limit_ms = 100.0
+            plot_latency_limit_ms = 30.0
             for stage_name, values in stage_latencies_ms.items():
                 if stage_name == "end_to_end":
                     continue  # raw metric is kept, but not shown on chart by request
