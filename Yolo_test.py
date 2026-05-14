@@ -108,13 +108,16 @@ class object_detection:
 
         if total_frames:
             plt.figure(figsize=(12, 6))
+            plot_latency_limit_ms = 100.0
             for stage_name, values in stage_latencies_ms.items():
                 if stage_name == "end_to_end":
                     continue  # raw metric is kept, but not shown on chart by request
-                plt.plot(timeline_s, values, label=stage_name)
+                clipped_values = [value if value <= plot_latency_limit_ms else None for value in values]
+                plt.plot(timeline_s, clipped_values, label=stage_name)
             plt.title("YOLO pipeline latency over time")
             plt.xlabel("Time from start (s)")
             plt.ylabel("Latency (ms)")
+            plt.ylim(0, plot_latency_limit_ms)
             plt.legend()
             plt.grid(alpha=0.3)
             plt.tight_layout()
