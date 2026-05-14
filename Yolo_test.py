@@ -41,10 +41,15 @@ class object_detection:
             "render_output": [],
             "end_to_end": [],
         }
+        timeline_s = []
+        pipeline_start_time = None
+
         while True:
             t0 = time.perf_counter()
             ret, frame = cap.read()  # Считываем кадр с видео
             t1 = time.perf_counter()
+            if pipeline_start_time is None:
+                pipeline_start_time = t0
             if not ret:
                 break
             frame_count += 1
@@ -92,6 +97,7 @@ class object_detection:
             stage_latencies_ms["postprocess"].append((t7 - t6) * 1000.0)
             stage_latencies_ms["render_output"].append((t8 - t7) * 1000.0)
             stage_latencies_ms["end_to_end"].append((t8 - t0) * 1000.0)
+            timeline_s.append(t8 - pipeline_start_time)
             total_frames += 1
 
         cap.release()
@@ -102,9 +108,11 @@ class object_detection:
         if total_frames:
             plt.figure(figsize=(12, 6))
             for stage_name, values in stage_latencies_ms.items():
-                plt.plot(values, label=stage_name)
-            plt.title("YOLO pipeline latency per frame")
-            plt.xlabel("Processed frame index")
+                if stage_name == "end_to_end":
+                    continue  # raw metric is kept, but not shown on chart by request
+                plt.plot(timeline_s, values, label=stage_name)
+            plt.title("YOLO pipeline latency over time")
+            plt.xlabel("Time from start (s)")
             plt.ylabel("Latency (ms)")
             plt.legend()
             plt.grid(alpha=0.3)
@@ -118,5 +126,6 @@ class object_detection:
             "total_processing_time_s": total_time,
             "latencies_ms": frame_latencies_ms,
             "stage_latencies_ms": stage_latencies_ms,
+            "timeline_s": timeline_s,
             "latency_plot_path": "pipeline_latency_plot.png",
         }
