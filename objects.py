@@ -8,6 +8,7 @@ import pynvml
 import numpy as np
 from Yolo_test import object_detection  # Импортируем класс Object из файла objects.py
 import matplotlib.pyplot as plt
+import traceback
 
 def read_energy(path="/sys/class/powercap/intel-rapl:0/energy_uj"):
     try:
@@ -48,6 +49,8 @@ start_time = time.time()
 
 process = psutil.Process()
 result = None
+detection_error = None
+start_energy = None
 #global start_energy
 try:
     # Отдельный поток для запуска detection()
@@ -55,9 +58,14 @@ try:
     from Yolo_test import object_detection 
 
     def run_detection():
-        global result, start_energy
-        start_energy = read_energy()
-        result = object_detection.detection()
+        global result, start_energy, detection_error
+        try:
+            start_energy = read_energy()
+            result = object_detection.detection()
+        except Exception as e:
+            detection_error = e
+            print("Detection failed:")
+            traceback.print_exc()
     detection_thread = Thread(target=run_detection)
     detection_thread.start()
     # Мониторинг ресурсов
@@ -84,10 +92,16 @@ try:
 
 except Exception as e:
     print(f"Ошибка: {e}")
+
+if detection_error is not None:
+    raise RuntimeError(f"Detection did not complete: {detection_error}")
+
 end_energy = read_energy()
 end_time = time.time()
 total_time = end_time - start_time
-power_cpu=calculate_power(start_energy, end_energy, total_time)
+power_cpu = 0
+if start_energy is not None and end_energy is not None and total_time > 0:
+    power_cpu = calculate_power(start_energy, end_energy, total_time)
 
     #print(cpu_power[i])
 def save_plot(x, y, filename, xlabel, ylabel, title):
