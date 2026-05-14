@@ -1,6 +1,7 @@
 from ultralytics import YOLO
 import cv2
 import time
+import matplotlib.pyplot as plt
 
 class object_detection:
     def detection():
@@ -31,17 +32,34 @@ class object_detection:
         total_frames = 0
         total_time = 0
         frame_latencies_ms = []
+        stage_latencies_ms = {
+            "capture_to_decode_start": [],
+            "decode": [],
+            "preprocess": [],
+            "inference": [],
+            "postprocess": [],
+            "render_output": [],
+            "end_to_end": [],
+        }
         while True:
+            t0 = time.perf_counter()
             ret, frame = cap.read()  # Считываем кадр с видео
+            t1 = time.perf_counter()
             if not ret:
                 break
             frame_count += 1
             if frame_count % frame_rate != 0:
                 continue
-            start_time = time.time()
+            start_time = time.perf_counter()
+
+            # Эмуляция этапов пайплайна для детального latency-профиля
+            t2 = start_time  # Decode End
+            t3 = t2          # Preprocess Start
 
             # Предсказание с использованием YOLOv8
+            t5 = time.perf_counter()  # Inference Start
             results = net.predict(source=frame,verbose=False)
+            t6 = time.perf_counter()  # Inference End
 
             # Обработка результатов предсказания
             for result in results:# перебирает слои 
@@ -55,23 +73,50 @@ class object_detection:
                         label = f"{net.names[class_id]}: {confidence:.2f}"
                         cv2.putText(frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
 
+            t7 = time.perf_counter()  # Postprocess End
+
             # Запись кадра в видео
             out_yolo.write(frame)
+            t8 = time.perf_counter()  # Render / Output
             print(f"Frame of video: {frame_count:.1f}")
 
-            end_time = time.time()
+            end_time = time.perf_counter()
+            t4 = t5  # Preprocess End
             frame_time_s = end_time - start_time
             total_time += frame_time_s
             frame_latencies_ms.append(frame_time_s * 1000.0)
+            stage_latencies_ms["capture_to_decode_start"].append((t1 - t0) * 1000.0)
+            stage_latencies_ms["decode"].append((t2 - t1) * 1000.0)
+            stage_latencies_ms["preprocess"].append((t4 - t3) * 1000.0)
+            stage_latencies_ms["inference"].append((t6 - t5) * 1000.0)
+            stage_latencies_ms["postprocess"].append((t7 - t6) * 1000.0)
+            stage_latencies_ms["render_output"].append((t8 - t7) * 1000.0)
+            stage_latencies_ms["end_to_end"].append((t8 - t0) * 1000.0)
             total_frames += 1
 
         cap.release()
         out_yolo.release()
 
         avg_time_per_frame = total_time / total_frames if total_frames else 0
+
+        if total_frames:
+            plt.figure(figsize=(12, 6))
+            for stage_name, values in stage_latencies_ms.items():
+                plt.plot(values, label=stage_name)
+            plt.title("YOLO pipeline latency per frame")
+            plt.xlabel("Processed frame index")
+            plt.ylabel("Latency (ms)")
+            plt.legend()
+            plt.grid(alpha=0.3)
+            plt.tight_layout()
+            plt.savefig("pipeline_latency_plot.png")
+            plt.close()
+
         return {
             "avg_time_per_frame_s": avg_time_per_frame,
             "total_frames": total_frames,
             "total_processing_time_s": total_time,
             "latencies_ms": frame_latencies_ms,
+            "stage_latencies_ms": stage_latencies_ms,
+            "latency_plot_path": "pipeline_latency_plot.png",
         }
