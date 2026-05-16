@@ -5,7 +5,12 @@ import cv2
 class object_detection:
     @staticmethod
     def detection(
-        model_path: str = "/home/oleg/runs/detect/train9/weights/best.pt",
+        #net = YOLO("/home/oleg/runs/detect/train6/weights/best.pt") #model pre auta
+        #net = YOLO("/home/oleg/runs/detect/train9/weights/best.pt")
+        #net = YOLO("yolov8x.pt")  # Наприклад, використання YOLOv8m
+
+        #net = YOLO("/home/oleh/runs/detect/train9/weights/best.pt") # location for notebook
+        model_path: str = "/home/oleg/runs/detect/train6/weights/best.pt",
         video_path: str = "Video/video_yolo_cars.mp4",
         output_path: str = "video_yolo.mp4",
         confidence_threshold: float = 0.5,
