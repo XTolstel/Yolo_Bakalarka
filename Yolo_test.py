@@ -23,6 +23,7 @@ class object_detection:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
 
+        class_names = model.names
         processed_frames = 0
 
         while True:
@@ -39,12 +40,28 @@ class object_detection:
                         continue
 
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    class_id = int(box.cls[0].cpu().numpy())
+                    label = class_names.get(class_id, str(class_id)) if isinstance(class_names, dict) else class_names[class_id]
+
                     cv2.rectangle(
                         frame,
                         (int(x1), int(y1)),
                         (int(x2), int(y2)),
                         (0, 255, 0),
                         2,
+                    )
+
+                    label_text = f"{label} {confidence:.2f}"
+                    text_y = int(y1) - 10 if int(y1) - 10 > 10 else int(y1) + 20
+                    cv2.putText(
+                        frame,
+                        label_text,
+                        (int(x1), text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0, 255, 0),
+                        2,
+                        cv2.LINE_AA,
                     )
 
             writer.write(frame)
