@@ -5,7 +5,7 @@ import cv2
 class object_detection:
     @staticmethod
     def detection(
-        model_path: str = "runs/detect/train/weights/best.pt",
+        model_path: str = "/home/oleg/runs/detect/train9/weights/best.pt",
         video_path: str = "Video/video_yolo_cars.mp4",
         output_path: str = "video_yolo.mp4",
         confidence_threshold: float = 0.5,
@@ -48,11 +48,13 @@ class object_detection:
                     )
 
             writer.write(frame)
+            print(f"Готово. Обработано кадров: {processed_frames}")
             processed_frames += 1
+            
 
         cap.release()
         writer.release()
-
+        
         return {
             "processed_frames": processed_frames,
             "output_path": output_path,
