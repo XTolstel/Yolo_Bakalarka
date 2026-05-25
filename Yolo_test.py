@@ -1,90 +1,154 @@
-import cv2
-import torch
+import os
+import re
+import time
+import subprocess
+
+try:
+    import cv2
+except Exception:
+    cv2 = None
 
 
 class object_detection:
     @staticmethod
-    def detection(
-        model_name: str = "yolov5n",
-        video_path: str = "Video/video_yolo_cars.mp4",
-        output_path: str = "video_yolo.mp4",
-        confidence_threshold: float = 0.5,
-        use_repo_weights: bool = True,
-    ) -> dict:
+    def _get_video_path_from_deepstream_config(config_path):
         """
-        Детекция объектов с помощью YOLOv5 (через torch.hub), совместимо с Jetson Nano.
-
-        Args:
-            model_name: Название модели YOLOv5 (например, yolov5n, yolov5s) или путь к .pt файлу.
-            video_path: Путь к входному видео.
-            output_path: Путь для сохранения выходного видео.
-            confidence_threshold: Минимальный порог уверенности детекции.
-            use_repo_weights: Если True — загружает предобученные веса из репозитория ultralytics/yolov5.
-                              Если False — model_name трактуется как путь к локальному файлу весов.
+        Берёт путь к видео из строки:
+        uri=file:///home/jetson/...
         """
-        if use_repo_weights:
-            model = torch.hub.load("ultralytics/yolov5", model_name, pretrained=True)
-        else:
-            model = torch.hub.load("ultralytics/yolov5", "custom", path=model_name)
+        try:
+            with open(config_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("uri=file://"):
+                        uri = line.split("=", 1)[1].strip()
+                        return uri.replace("file://", "")
+        except FileNotFoundError:
+            return None
 
-        model.conf = confidence_threshold
+        return None
+
+    @staticmethod
+    def _count_video_frames(video_path):
+        if cv2 is None or not video_path or not os.path.exists(video_path):
+            return 0
 
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            raise RuntimeError(f"Не удалось открыть видео: {video_path}")
+            return 0
 
-        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
-
-        class_names = model.names
-        processed_frames = 0
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            results = model(frame)
-
-            for *xyxy, conf, cls in results.xyxy[0].cpu().numpy():
-                x1, y1, x2, y2 = map(int, xyxy)
-                confidence = float(conf)
-                class_id = int(cls)
-                label = class_names[class_id] if class_id < len(class_names) else str(class_id)
-
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-                label_text = f"{label} {confidence:.2f}"
-                text_y = y1 - 10 if y1 - 10 > 10 else y1 + 20
-                cv2.putText(
-                    frame,
-                    label_text,
-                    (x1, text_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 255, 0),
-                    2,
-                    cv2.LINE_AA,
-                )
-
-            writer.write(frame)
-            processed_frames += 1
-            print(f"Готово. Обработано кадров: {processed_frames}")
-
+        frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
-        writer.release()
+        return frames
+
+    @staticmethod
+    def _extract_fps_from_deepstream_line(line):
+        """
+        Пробуем достать FPS из строк DeepStream вида:
+        **PERF:  12.34 (12.01)
+        """
+        if "PERF" not in line:
+            return None
+
+        if "PERF:" in line:
+            line = line.split("PERF:", 1)[1]
+
+        numbers = re.findall(r"\d+(?:\.\d+)?", line)
+        values = []
+
+        for n in numbers:
+            value = float(n)
+            if 0.1 <= value <= 500:
+                values.append(value)
+
+        if not values:
+            return None
+
+        return values[0]
+
+    @staticmethod
+    def detection():
+        home = os.path.expanduser("~")
+
+        deepstream_dir = os.path.join(home, "DeepStream-Yolo")
+        config_path = os.path.join(deepstream_dir, "deepstream_app_config.txt")
+
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Config not found: {config_path}")
+
+        video_path = object_detection._get_video_path_from_deepstream_config(config_path)
+        total_frames = object_detection._count_video_frames(video_path)
+
+        cmd = [
+            "stdbuf", "-oL", "-eL",
+            "deepstream-app",
+            "-c", config_path
+        ]
+
+        fps_values = []
+        log_path = os.path.join(deepstream_dir, "deepstream_python_wrapper.log")
+
+        print("Starting DeepStream...")
+        print("Config:", config_path)
+        print("Video:", video_path)
+        print("Command:", " ".join(cmd))
+
+        start_time = time.perf_counter()
+
+        with open(log_path, "w") as log_file:
+            process = subprocess.Popen(
+                cmd,
+                cwd=deepstream_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+
+            for line in process.stdout:
+                print(line, end="")
+                log_file.write(line)
+
+                fps = object_detection._extract_fps_from_deepstream_line(line)
+                if fps is not None:
+                    fps_values.append(fps)
+
+            return_code = process.wait()
+
+        end_time = time.perf_counter()
+        wall_time_s = end_time - start_time
+
+        if return_code != 0:
+            raise RuntimeError(
+                f"DeepStream finished with error code {return_code}. "
+                f"Check log: {log_path}"
+            )
+
+        if fps_values:
+            avg_fps = sum(fps_values) / len(fps_values)
+        elif total_frames > 0 and wall_time_s > 0:
+            avg_fps = total_frames / wall_time_s
+        else:
+            avg_fps = 0
+
+        if total_frames > 0 and avg_fps > 0:
+            processing_time_s = total_frames / avg_fps
+        else:
+            processing_time_s = wall_time_s
+
+        avg_time_per_frame_s = 1 / avg_fps if avg_fps > 0 else 0
+
+        # Это не настоящие per-frame latency, а приближение из FPS DeepStream.
+        latencies_ms = [1000 / fps for fps in fps_values if fps > 0]
 
         return {
-            "processed_frames": processed_frames,
-            "output_path": output_path,
+            "avg_time_per_frame_s": avg_time_per_frame_s,
+            "total_frames": total_frames,
+            "total_processing_time_s": processing_time_s,
+            "latencies_ms": latencies_ms,
+            "stage_latencies_ms": {},
+            "timeline_s": [],
+            "deepstream_avg_fps": avg_fps,
+            "deepstream_wall_time_s": wall_time_s,
+            "deepstream_log_path": log_path,
         }
-
-
-if __name__ == "__main__":
-    result = object_detection.detection()
-    print(f"Готово. Обработано кадров: {result['processed_frames']}")
-    print(f"Видео сохранено: {result['output_path']}")
