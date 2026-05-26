@@ -1,9 +1,8 @@
 import argparse
-import csv
 import math
-import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -13,61 +12,109 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
-FPS_REGEX = re.compile(r"(?i)\bfps\b[^0-9]*([0-9]+(?:\.[0-9]+)?)")
+FPS_REGEXES = [
+    re.compile(r"(?i)processed\s+\d+\s+frames\s+at\s+([0-9]+(?:\.[0-9]+)?)\s*fps"),
+    re.compile(r"(?i)([0-9]+(?:\.[0-9]+)?)\s*fps"),
+]
 
 
-def monitor_system(metrics, stop_event, start_time, sample_interval):
+def get_video_info(video_path: Path):
     """
-    Собирает системные параметры во время работы Hailo Apps.
-    На Raspberry Pi нет таких датчиков CPU/GPU power, как на Jetson.
-    Поэтому power-поля будут NaN, если не задать их вручную.
+    Возвращает количество кадров и Source video FPS исходного видео.
     """
+    try:
+        import cv2
+        cap = cv2.VideoCapture(str(video_path))
+
+        frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        source_fps = float(cap.get(cv2.CAP_PROP_FPS))
+
+        cap.release()
+
+        if frames <= 0:
+            frames = None
+
+        if source_fps <= 0:
+            source_fps = math.nan
+
+        return frames, source_fps
+
+    except Exception:
+        return None, math.nan
+    
+
+def get_process_memory_mb(pid):
+    """
+    Возвращает RAM, занятую процессом object_detection.py
+    вместе с дочерними процессами, в мегабайтах.
+    """
+    try:
+        process = psutil.Process(pid)
+
+        total_memory = process.memory_info().rss
+
+        for child in process.children(recursive=True):
+            try:
+                total_memory += child.memory_info().rss
+            except psutil.NoSuchProcess:
+                pass
+
+        return total_memory / (1024 * 1024)
+
+    except psutil.NoSuchProcess:
+        return math.nan
+
+
+def monitor_system(metrics, stop_event, start_time, sample_interval, process_pid):
+    psutil.cpu_percent(interval=None)
+
     while not stop_event.is_set():
         now = time.time() - start_time
 
-        cpu_usage = psutil.cpu_percent(interval=None)
-        ram_usage = psutil.virtual_memory().percent
-
         metrics.append({
             "time_s": now,
-            "cpu_usage_percent": cpu_usage,
-            "ram_usage_percent": ram_usage,
+            "cpu_usage_percent": psutil.cpu_percent(interval=None),
 
-            # Hailo 8 — это не GPU, поэтому GPU usage как на Jetson здесь недоступен.
-            "gpu_usage_percent": math.nan,
-
-            # На Raspberry Pi нет стандартного датчика мощности CPU/GPU.
-            "cpu_power_w": math.nan,
-            "gpu_power_w": math.nan,
+            # RAM процесса object_detection.py в мегабайтах
+            "ram_used_mb": get_process_memory_mb(process_pid),
 
             "fps": math.nan,
             "latency_ms": math.nan,
+
+            # Для совместимости с Jetson-кодом поля оставлены.
+            "cpu_power_w": math.nan,
+            "gpu_power_w": math.nan,
         })
 
         time.sleep(sample_interval)
 
 
 def read_process_output(process, fps_values):
-    """
-    Читает вывод object_detection.py и пытается достать FPS.
-    """
     for line in iter(process.stdout.readline, ""):
         print(line, end="")
 
-        match = FPS_REGEX.search(line)
-        if match:
-            try:
-                fps = float(match.group(1))
-                if fps > 0:
-                    fps_values.append((time.time(), fps))
-            except ValueError:
-                pass
+        for regex in FPS_REGEXES:
+            match = regex.search(line)
+            if match:
+                try:
+                    fps = float(match.group(1))
+                    if fps > 0:
+                        fps_values.append((time.time(), fps))
+                except ValueError:
+                    pass
+                break
 
 
-def save_metrics_csv(metrics, csv_path):
-    df = pd.DataFrame(metrics)
-    df.to_csv(csv_path, index=False)
-    return df
+def fill_fps_and_latency(metrics, fps_values, start_time, processing_fps):
+    if not metrics:
+        return
+
+    # Для Hailo Apps надёжнее использовать итоговый processing_fps,
+    # потому что строка FPS часто выводится только в конце.
+    if processing_fps and not math.isnan(processing_fps):
+        for row in metrics:
+            row["fps"] = processing_fps
+            row["latency_ms"] = 1000.0 / processing_fps if processing_fps > 0 else math.nan
 
 
 def plot_metric(df, x_col, y_col, title, ylabel, output_path):
@@ -88,27 +135,35 @@ def plot_metric(df, x_col, y_col, title, ylabel, output_path):
     plt.savefig(output_path, dpi=150)
     plt.close()
 
+def plot_fps_comparison(df, output_path):
+        """
+        Строит график двух FPS:
+        Source video FPS — FPS исходного видео.
+        Processing FPS — скорость обработки Hailo.
+        """
+        if df.empty:
+            return
 
-def get_video_frame_count(video_path):
-    """
-    Получает количество кадров через OpenCV.
-    Если OpenCV не сможет прочитать видео, вернёт None.
-    """
-    try:
-        import cv2
-        cap = cv2.VideoCapture(str(video_path))
-        frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
-        if frames > 0:
-            return frames
-    except Exception:
-        pass
+        plt.figure(figsize=(10, 5))
 
-    return None
+        if "processing_fps" in df.columns and not df["processing_fps"].dropna().empty:
+            plt.plot(df["time_s"], df["processing_fps"], label="Processing FPS")
 
+        if "source_video_fps" in df.columns and not df["source_video_fps"].dropna().empty:
+            plt.plot(df["time_s"], df["source_video_fps"], label="Source video FPS")
 
+        plt.title("Source video FPS vs Processing FPS")
+        plt.xlabel("Time, s")
+        plt.ylabel("FPS")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150)
+        plt.close()
 def main():
-    parser = argparse.ArgumentParser(description="Run YOLO object detection on Hailo 8 and collect metrics.")
+    parser = argparse.ArgumentParser(
+        description="Run YOLO object detection on Hailo 8 and collect benchmark metrics."
+    )
 
     parser.add_argument(
         "-i", "--input",
@@ -145,14 +200,14 @@ def main():
         "--cpu-power-watts",
         type=float,
         default=None,
-        help="Manual average CPU power in watts, if measured externally"
+        help="Manual average CPU power in watts"
     )
 
     parser.add_argument(
         "--gpu-power-watts",
         type=float,
         default=None,
-        help="Manual average accelerator/GPU power in watts, if measured externally"
+        help="Manual average Hailo/GPU power in watts"
     )
 
     args = parser.parse_args()
@@ -161,18 +216,16 @@ def main():
     output_dir = Path(args.output)
     hailo_app = Path(args.hailo_app)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     if not input_video.exists():
         raise FileNotFoundError(f"Input video not found: {input_video}")
 
     if not hailo_app.exists():
         raise FileNotFoundError(f"Hailo object_detection.py not found: {hailo_app}")
 
-    metrics = []
-    fps_values = []
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     command = [
+        sys.executable,
         str(hailo_app),
         "-n", args.model,
         "-i", str(input_video),
@@ -184,27 +237,38 @@ def main():
         "-o", str(output_dir),
     ]
 
-    print("\nЗапускаю Hailo object detection:")
+    print("\nЗапускаю Hailo YOLO detection:")
     print(" ".join(command))
     print()
+
+    metrics = []
+    fps_values = []
 
     start_time = time.time()
     stop_event = threading.Event()
 
+    process = subprocess.Popen(
+    command,
+    cwd=str(hailo_app.parent),
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    bufsize=1
+    )
+
     monitor_thread = threading.Thread(
         target=monitor_system,
-        args=(metrics, stop_event, start_time, args.sample_interval),
+        args=(metrics, stop_event, start_time, args.sample_interval, process.pid),
         daemon=True
     )
     monitor_thread.start()
 
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
+    output_thread = threading.Thread(
+        target=read_process_output,
+        args=(process, fps_values),
+        daemon=True
     )
+    output_thread.start()
 
     output_thread = threading.Thread(
         target=read_process_output,
@@ -221,29 +285,22 @@ def main():
     end_time = time.time()
     total_time = end_time - start_time
 
-    frame_count = get_video_frame_count(input_video)
+    frame_count, source_video_fps = get_video_info(input_video)
 
-    if frame_count and total_time > 0:
-        avg_fps = frame_count / total_time
-        avg_latency_ms = 1000.0 / avg_fps if avg_fps > 0 else math.nan
+    if return_code == 0 and frame_count:
+        processed_frames = frame_count
     else:
-        avg_fps = math.nan
+        processed_frames = 0
+
+    if processed_frames > 0 and total_time > 0:
+        processing_fps = processed_frames / total_time
+        avg_latency_ms = 1000.0 / processing_fps if processing_fps > 0 else math.nan
+    else:
+        processing_fps = math.nan
         avg_latency_ms = math.nan
 
-    # Если Hailo Apps вывел FPS, используем его для графика latency.
-    if fps_values and metrics:
-        for row in metrics:
-            row_time_abs = start_time + row["time_s"]
+    fill_fps_and_latency(metrics, fps_values, start_time, processing_fps)
 
-            nearest_fps = min(
-                fps_values,
-                key=lambda item: abs(item[0] - row_time_abs)
-            )[1]
-
-            row["fps"] = nearest_fps
-            row["latency_ms"] = 1000.0 / nearest_fps if nearest_fps > 0 else math.nan
-
-    # Если пользователь вручную задал мощность, заполняем power-поля.
     for row in metrics:
         if args.cpu_power_watts is not None:
             row["cpu_power_w"] = args.cpu_power_watts
@@ -251,21 +308,29 @@ def main():
         if args.gpu_power_watts is not None:
             row["gpu_power_w"] = args.gpu_power_watts
 
-    avg_cpu_usage = pd.DataFrame(metrics)["cpu_usage_percent"].mean() if metrics else math.nan
+    for row in metrics:
+        row["source_video_fps"] = source_video_fps
+        row["processing_fps"] = row["fps"]
+
+    df = pd.DataFrame(metrics)
+
+    avg_cpu_usage = df["cpu_usage_percent"].mean() if not df.empty else math.nan
+    avg_ram_used_mb = df["ram_used_mb"].mean() if not df.empty else math.nan
+    max_ram_used_mb = df["ram_used_mb"].max() if not df.empty else math.nan
 
     avg_cpu_power = args.cpu_power_watts if args.cpu_power_watts is not None else math.nan
     avg_gpu_power = args.gpu_power_watts if args.gpu_power_watts is not None else math.nan
 
-    if frame_count and args.cpu_power_watts is not None and args.gpu_power_watts is not None:
-        total_power = args.cpu_power_watts + args.gpu_power_watts
-        energy_per_frame_j = total_power * total_time / frame_count
+    if processed_frames > 0 and args.cpu_power_watts is not None and args.gpu_power_watts is not None:
+        total_power_w = args.cpu_power_watts + args.gpu_power_watts
+        energy_per_frame_j = total_power_w * total_time / processed_frames
     else:
         energy_per_frame_j = math.nan
 
     csv_path = output_dir / "hailo_metrics.csv"
     summary_path = output_dir / "hailo_summary.txt"
 
-    df = save_metrics_csv(metrics, csv_path)
+    df.to_csv(csv_path, index=False)
 
     plot_metric(
         df,
@@ -277,12 +342,44 @@ def main():
     )
 
     plot_metric(
+    df,
+    "time_s",
+    "ram_used_mb",
+    "RAM used during Hailo YOLO inference",
+    "RAM used, MB",
+    output_dir / "ram_used_mb.png"
+    )   
+
+    plot_metric(
+    df,
+    "time_s",
+    "processing_fps",
+    "Processing FPS during Hailo YOLO inference",
+    "Processing FPS",
+    output_dir / "processing_fps.png"
+    )
+
+    plot_metric(
         df,
         "time_s",
-        "gpu_usage_percent",
-        "GPU usage during Hailo YOLO inference",
-        "GPU usage, %",
-        output_dir / "gpu_usage.png"
+        "source_video_fps",
+        "Source video FPS",
+        "Source video FPS",
+        output_dir / "source_video_fps.png"
+    )
+
+    plot_fps_comparison(
+        df,
+        output_dir / "fps_comparison.png"
+    )
+
+    plot_metric(
+        df,
+        "time_s",
+        "latency_ms",
+        "Latency during Hailo YOLO inference",
+        "Latency, ms",
+        output_dir / "latency.png"
     )
 
     plot_metric(
@@ -298,19 +395,15 @@ def main():
         df,
         "time_s",
         "gpu_power_w",
-        "GPU / accelerator power during Hailo YOLO inference",
-        "GPU / accelerator power, W",
+        "Hailo accelerator power during YOLO inference",
+        "Hailo/GPU power, W",
         output_dir / "gpu_power.png"
     )
 
-    plot_metric(
-        df,
-        "time_s",
-        "latency_ms",
-        "Latency during Hailo YOLO inference",
-        "Latency, ms",
-        output_dir / "latency.png"
-    )
+
+
+    
+
 
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write("Hailo 8 YOLO benchmark summary\n")
@@ -320,10 +413,14 @@ def main():
         f.write(f"Output directory: {output_dir}\n")
         f.write(f"Return code: {return_code}\n")
         f.write(f"Total time, s: {total_time:.3f}\n")
-        f.write(f"Frame count: {frame_count}\n")
-        f.write(f"Average FPS: {avg_fps:.3f}\n")
+        f.write(f"Frame count in video: {frame_count}\n")
+        f.write(f"Processed frames: {processed_frames}\n")
+        f.write(f"Source video FPS: {source_video_fps:.3f}\n")
+        f.write(f"Processing FPS: {processing_fps:.3f}\n")
         f.write(f"Average latency, ms: {avg_latency_ms:.3f}\n")
         f.write(f"Average CPU usage, %: {avg_cpu_usage:.3f}\n")
+        f.write(f"Average RAM used, MB: {avg_ram_used_mb:.3f}\n")
+        f.write(f"Max RAM used, MB: {max_ram_used_mb:.3f}\n")
         f.write(f"Average CPU power, W: {avg_cpu_power}\n")
         f.write(f"Average GPU power, W: {avg_gpu_power}\n")
         f.write(f"energy_per_frame_j: {energy_per_frame_j}\n")
@@ -333,9 +430,13 @@ def main():
     print(f"Summary: {summary_path}")
     print(f"Графики сохранены в: {output_dir}")
     print()
-    print(f"Average FPS: {avg_fps:.3f}")
+    print(f"Processed frames: {processed_frames}")
+    print(f"Source video FPS: {source_video_fps:.3f}")
+    print(f"Processing FPS: {processing_fps:.3f}")
     print(f"Average latency, ms: {avg_latency_ms:.3f}")
     print(f"Average CPU usage, %: {avg_cpu_usage:.3f}")
+    print(f"Average RAM used, MB: {avg_ram_used_mb:.3f}")
+    print(f"Max RAM used, MB: {max_ram_used_mb:.3f}")
     print(f"Average CPU power: {avg_cpu_power}")
     print(f"Average GPU power: {avg_gpu_power}")
     print(f"energy_per_frame_j: {energy_per_frame_j}")
