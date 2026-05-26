@@ -433,3 +433,17 @@ FodyWeavers.xsd
 *.pt
 *.mp4
 *.pt
+
+# Ignore video files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+
+# Ignore data/output folders
+Video/
+JetsonData/
+jetsonData/
+Hailo_Data/
+Hailo Data/
