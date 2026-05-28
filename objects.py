@@ -17,6 +17,17 @@ FPS_REGEXES = [
     re.compile(r"(?i)([0-9]+(?:\.[0-9]+)?)\s*fps"),
 ]
 
+PMIC_LINE_RE = re.compile(
+    r"^(.+?)_(A|V)\s+(current|volt)\(\d+\)=([-+]?[0-9]*\.?[0-9]+)([AV])$"
+)
+
+
+def is_valid_number(value):
+    try:
+        return value is not None and math.isfinite(float(value))
+    except Exception:
+        return False
+
 
 def get_video_info(video_path: Path):
     """
@@ -41,7 +52,7 @@ def get_video_info(video_path: Path):
 
     except Exception:
         return None, math.nan
-    
+
 
 def get_process_memory_mb(pid):
     """
@@ -65,11 +76,103 @@ def get_process_memory_mb(pid):
         return math.nan
 
 
-def monitor_system(metrics, stop_event, start_time, sample_interval, process_pid):
+def read_raspberry_pmic_power_w():
+    """
+    Считает приблизительную мощность Raspberry Pi 5 по vcgencmd pmic_read_adc.
+
+    Если доступен EXT5V current, используется входная мощность EXT5V.
+    Если EXT5V current нет, считается сумма внутренних rail'ов:
+        P_total = sum(V_rail * I_rail)
+    """
+    try:
+        result = subprocess.run(
+            ["vcgencmd", "pmic_read_adc"],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False
+        )
+
+        if result.returncode != 0:
+            return math.nan
+
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return math.nan
+
+    voltages = {}
+    currents = {}
+
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        match = PMIC_LINE_RE.match(line)
+
+        if not match:
+            continue
+
+        rail, suffix, kind, value_text, unit = match.groups()
+
+        try:
+            value = float(value_text)
+        except ValueError:
+            continue
+
+        if kind == "volt" or suffix == "V" or unit == "V":
+            voltages[rail] = value
+        elif kind == "current" or suffix == "A" or unit == "A":
+            currents[rail] = value
+
+    # Если прошивка отдаёт прямой входной ток EXT5V, используем его.
+    if "EXT5V" in voltages and "EXT5V" in currents:
+        input_power = voltages["EXT5V"] * currents["EXT5V"]
+        return input_power if input_power > 0 else math.nan
+
+    # Иначе суммируем внутренние rail'ы.
+    total_power_w = 0.0
+    used_rails = 0
+
+    for rail, current in currents.items():
+        if rail == "EXT5V":
+            continue
+
+        voltage = voltages.get(rail)
+        if voltage is None:
+            continue
+
+        power = voltage * current
+
+        if power > 0 and math.isfinite(power):
+            total_power_w += power
+            used_rails += 1
+
+    if used_rails == 0:
+        return math.nan
+
+    return total_power_w
+
+
+def calculate_hailo_power_w(pmic_total_power_w, baseline_power_w):
+    """
+    Оценка мощности Hailo:
+        Hailo Power = PMIC total power - Raspberry Pi idle baseline
+
+    baseline_power_w по умолчанию = 1.7 W.
+    max(..., 0) нужен, чтобы не получать отрицательные значения при шуме измерений.
+    """
+    if not is_valid_number(pmic_total_power_w):
+        return math.nan
+
+    hailo_power_w = float(pmic_total_power_w) - float(baseline_power_w)
+    return max(hailo_power_w, 0.0)
+
+
+def monitor_system(metrics, stop_event, start_time, sample_interval, process_pid, use_pmic_power, hailo_baseline_watts):
     psutil.cpu_percent(interval=None)
 
     while not stop_event.is_set():
         now = time.time() - start_time
+
+        pmic_total_power_w = read_raspberry_pmic_power_w() if use_pmic_power else math.nan
+        hailo_power_w = calculate_hailo_power_w(pmic_total_power_w, hailo_baseline_watts)
 
         metrics.append({
             "time_s": now,
@@ -81,9 +184,15 @@ def monitor_system(metrics, stop_event, start_time, sample_interval, process_pid
             "fps": math.nan,
             "latency_ms": math.nan,
 
-            # Для совместимости с Jetson-кодом поля оставлены.
-            "cpu_power_w": math.nan,
-            "gpu_power_w": math.nan,
+            # Полная оценочная мощность по PMIC rail'ам Raspberry Pi 5.
+            "pmic_total_power_w": pmic_total_power_w,
+
+            # Для совместимости с Jetson-кодом оставляем CPU power как baseline Raspberry Pi.
+            "cpu_power_w": hailo_baseline_watts,
+
+            # gpu_power_w используем как Hailo Power, чтобы сохранялась логика Average GPU power.
+            "gpu_power_w": hailo_power_w,
+            "hailo_power_w": hailo_power_w,
         })
 
         time.sleep(sample_interval)
@@ -135,31 +244,34 @@ def plot_metric(df, x_col, y_col, title, ylabel, output_path):
     plt.savefig(output_path, dpi=150)
     plt.close()
 
+
 def plot_fps_comparison(df, output_path):
-        """
-        Строит график двух FPS:
-        Source video FPS — FPS исходного видео.
-        Processing FPS — скорость обработки Hailo.
-        """
-        if df.empty:
-            return
+    """
+    Строит график двух FPS:
+    Source video FPS — FPS исходного видео.
+    Processing FPS — скорость обработки Hailo.
+    """
+    if df.empty:
+        return
 
-        plt.figure(figsize=(10, 5))
+    plt.figure(figsize=(10, 5))
 
-        if "processing_fps" in df.columns and not df["processing_fps"].dropna().empty:
-            plt.plot(df["time_s"], df["processing_fps"], label="Processing FPS")
+    if "processing_fps" in df.columns and not df["processing_fps"].dropna().empty:
+        plt.plot(df["time_s"], df["processing_fps"], label="Processing FPS")
 
-        if "source_video_fps" in df.columns and not df["source_video_fps"].dropna().empty:
-            plt.plot(df["time_s"], df["source_video_fps"], label="Source video FPS")
+    if "source_video_fps" in df.columns and not df["source_video_fps"].dropna().empty:
+        plt.plot(df["time_s"], df["source_video_fps"], label="Source video FPS")
 
-        plt.title("Source video FPS vs Processing FPS")
-        plt.xlabel("Time, s")
-        plt.ylabel("FPS")
-        plt.grid(True)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=150)
-        plt.close()
+    plt.title("Source video FPS vs Processing FPS")
+    plt.xlabel("Time, s")
+    plt.ylabel("FPS")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run YOLO object detection on Hailo 8 and collect benchmark metrics."
@@ -194,6 +306,19 @@ def main():
         type=float,
         default=1.0,
         help="Monitoring interval in seconds"
+    )
+
+    parser.add_argument(
+        "--hailo-baseline-watts",
+        type=float,
+        default=1.7,
+        help="Raspberry Pi baseline power in watts. Hailo Power = PMIC total power - baseline."
+    )
+
+    parser.add_argument(
+        "--no-pmic-power",
+        action="store_true",
+        help="Disable automatic Raspberry Pi 5 PMIC power reading"
     )
 
     parser.add_argument(
@@ -248,27 +373,28 @@ def main():
     stop_event = threading.Event()
 
     process = subprocess.Popen(
-    command,
-    cwd=str(hailo_app.parent),
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True,
-    bufsize=1
+        command,
+        cwd=str(hailo_app.parent),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1
     )
 
     monitor_thread = threading.Thread(
         target=monitor_system,
-        args=(metrics, stop_event, start_time, args.sample_interval, process.pid),
+        args=(
+            metrics,
+            stop_event,
+            start_time,
+            args.sample_interval,
+            process.pid,
+            not args.no_pmic_power,
+            args.hailo_baseline_watts
+        ),
         daemon=True
     )
     monitor_thread.start()
-
-    output_thread = threading.Thread(
-        target=read_process_output,
-        args=(process, fps_values),
-        daemon=True
-    )
-    output_thread.start()
 
     output_thread = threading.Thread(
         target=read_process_output,
@@ -281,6 +407,7 @@ def main():
 
     stop_event.set()
     monitor_thread.join(timeout=2)
+    output_thread.join(timeout=2)
 
     end_time = time.time()
     total_time = end_time - start_time
@@ -307,6 +434,7 @@ def main():
 
         if args.gpu_power_watts is not None:
             row["gpu_power_w"] = args.gpu_power_watts
+            row["hailo_power_w"] = args.gpu_power_watts
 
     for row in metrics:
         row["source_video_fps"] = source_video_fps
@@ -318,12 +446,29 @@ def main():
     avg_ram_used_mb = df["ram_used_mb"].mean() if not df.empty else math.nan
     max_ram_used_mb = df["ram_used_mb"].max() if not df.empty else math.nan
 
-    avg_cpu_power = args.cpu_power_watts if args.cpu_power_watts is not None else math.nan
-    avg_gpu_power = args.gpu_power_watts if args.gpu_power_watts is not None else math.nan
+    avg_pmic_total_power = (
+        df["pmic_total_power_w"].mean()
+        if not df.empty and "pmic_total_power_w" in df.columns and not df["pmic_total_power_w"].dropna().empty
+        else math.nan
+    )
 
-    if processed_frames > 0 and args.cpu_power_watts is not None and args.gpu_power_watts is not None:
-        total_power_w = args.cpu_power_watts + args.gpu_power_watts
-        energy_per_frame_j = total_power_w * total_time / processed_frames
+    avg_hailo_power = (
+        df["hailo_power_w"].mean()
+        if not df.empty and "hailo_power_w" in df.columns and not df["hailo_power_w"].dropna().empty
+        else math.nan
+    )
+
+    avg_cpu_power = (
+        df["cpu_power_w"].mean()
+        if not df.empty and "cpu_power_w" in df.columns and not df["cpu_power_w"].dropna().empty
+        else math.nan
+    )
+
+    # Для совместимости: Average GPU power = Average Hailo Power.
+    avg_gpu_power = avg_hailo_power
+
+    if processed_frames > 0 and total_time > 0 and is_valid_number(avg_hailo_power):
+        energy_per_frame_j = avg_hailo_power * (total_time / processed_frames)
     else:
         energy_per_frame_j = math.nan
 
@@ -342,21 +487,21 @@ def main():
     )
 
     plot_metric(
-    df,
-    "time_s",
-    "ram_used_mb",
-    "RAM used during Hailo YOLO inference",
-    "RAM used, MB",
-    output_dir / "ram_used_mb.png"
-    )   
+        df,
+        "time_s",
+        "ram_used_mb",
+        "RAM used during Hailo YOLO inference",
+        "RAM used, MB",
+        output_dir / "ram_used_mb.png"
+    )
 
     plot_metric(
-    df,
-    "time_s",
-    "processing_fps",
-    "Processing FPS during Hailo YOLO inference",
-    "Processing FPS",
-    output_dir / "processing_fps.png"
+        df,
+        "time_s",
+        "processing_fps",
+        "Processing FPS during Hailo YOLO inference",
+        "Processing FPS",
+        output_dir / "processing_fps.png"
     )
 
     plot_metric(
@@ -385,25 +530,39 @@ def main():
     plot_metric(
         df,
         "time_s",
+        "pmic_total_power_w",
+        "PMIC total power during Hailo YOLO inference",
+        "PMIC total power, W",
+        output_dir / "pmic_total_power.png"
+    )
+
+    plot_metric(
+        df,
+        "time_s",
         "cpu_power_w",
-        "CPU power during Hailo YOLO inference",
-        "CPU power, W",
+        "Raspberry Pi baseline power",
+        "CPU/platform baseline power, W",
         output_dir / "cpu_power.png"
     )
 
     plot_metric(
         df,
         "time_s",
-        "gpu_power_w",
-        "Hailo accelerator power during YOLO inference",
-        "Hailo/GPU power, W",
-        output_dir / "gpu_power.png"
+        "hailo_power_w",
+        "Hailo Power during YOLO inference",
+        "Hailo Power, W",
+        output_dir / "hailo_power.png"
     )
 
-
-
-    
-
+    # Оставляем старое имя файла gpu_power.png для совместимости.
+    plot_metric(
+        df,
+        "time_s",
+        "gpu_power_w",
+        "Hailo Power during YOLO inference",
+        "Hailo Power, W",
+        output_dir / "gpu_power.png"
+    )
 
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write("Hailo 8 YOLO benchmark summary\n")
@@ -421,6 +580,9 @@ def main():
         f.write(f"Average CPU usage, %: {avg_cpu_usage:.3f}\n")
         f.write(f"Average RAM used, MB: {avg_ram_used_mb:.3f}\n")
         f.write(f"Max RAM used, MB: {max_ram_used_mb:.3f}\n")
+        f.write(f"Average PMIC total power, W: {avg_pmic_total_power}\n")
+        f.write(f"Hailo baseline subtracted, W: {args.hailo_baseline_watts}\n")
+        f.write(f"Average Hailo Power, W: {avg_hailo_power}\n")
         f.write(f"Average CPU power, W: {avg_cpu_power}\n")
         f.write(f"Average GPU power, W: {avg_gpu_power}\n")
         f.write(f"energy_per_frame_j: {energy_per_frame_j}\n")
@@ -437,6 +599,9 @@ def main():
     print(f"Average CPU usage, %: {avg_cpu_usage:.3f}")
     print(f"Average RAM used, MB: {avg_ram_used_mb:.3f}")
     print(f"Max RAM used, MB: {max_ram_used_mb:.3f}")
+    print(f"Average PMIC total power: {avg_pmic_total_power}")
+    print(f"Hailo baseline subtracted: {args.hailo_baseline_watts}")
+    print(f"Average Hailo Power: {avg_hailo_power}")
     print(f"Average CPU power: {avg_cpu_power}")
     print(f"Average GPU power: {avg_gpu_power}")
     print(f"energy_per_frame_j: {energy_per_frame_j}")
